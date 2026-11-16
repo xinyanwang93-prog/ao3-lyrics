@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.2.0
-// @description  在指定 AO3 章节里播放配乐，支持循环播放和按 LRC 时间戳逐字显示浮动歌词。
+// @version      1.3.0
+// @description  在指定 AO3 章节播放配乐，支持收起播放器、循环播放和按 LRC 时间戳逐字显示歌词。
 // @match        https://archiveofourown.org/works/*
 // @connect      xinyanwang93-prog.github.io
 // @grant        GM_xmlhttpRequest
@@ -167,8 +167,16 @@
         font-size: .8125rem;
       }
       .controls { width: min(18rem, calc(100vw - 42px)); }
+      .player-heading {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 6px;
+        margin-bottom: 5px;
+      }
       .title {
-        margin: 1px 3px 4px;
+        min-width: 0;
+        margin: 3px 3px 0;
         font-size: .875rem;
         font-weight: 600;
         overflow-wrap: anywhere;
@@ -189,7 +197,8 @@
         font: inherit;
         cursor: pointer;
       }
-      .start, .loop-toggle[aria-pressed="true"] {
+      .collapse { flex: none; padding: 3px 6px; }
+      .start, .expand, .loop-toggle[aria-pressed="true"] {
         background: #f7d9b3;
         color: #2a1b11;
         font-weight: 650;
@@ -201,8 +210,12 @@
     <div class="lyric" aria-hidden="true" hidden></div>
     <div class="player" role="group" aria-label="章节配乐">
       <button type="button" class="start" disabled>正在读取歌词…</button>
-      <div class="controls" hidden>
-        <p class="title"></p>
+      <button type="button" class="expand" aria-controls="ao3-lyrics-controls" aria-expanded="false" hidden>展开播放器</button>
+      <div class="controls" id="ao3-lyrics-controls" hidden>
+        <div class="player-heading">
+          <p class="title"></p>
+          <button type="button" class="collapse" aria-controls="ao3-lyrics-controls" aria-expanded="true">收起播放器</button>
+        </div>
         <audio controls preload="none"></audio>
         <div class="actions">
           <button type="button" class="replay">从头播放</button>
@@ -222,6 +235,8 @@
   layer.innerHTML = markup;
   const player = layer.querySelector(".player");
   const start = layer.querySelector(".start");
+  const expand = layer.querySelector(".expand");
+  const collapse = layer.querySelector(".collapse");
   const controls = layer.querySelector(".controls");
   const sound = layer.querySelector("audio");
   const title = layer.querySelector(".title");
@@ -242,6 +257,7 @@
   let positions = [];
   let activeIndex = -1;
   let animationFrame = 0;
+  let playerView = "closed";
   let started = false;
   let shuffleOnPlay = false;
   let showLyrics = true;
@@ -312,7 +328,7 @@
   }
 
   function drawLyric() {
-    if (!started || !showLyrics || sound.seeking || sound.ended || controls.hidden) {
+    if (!started || !showLyrics || sound.seeking || sound.ended || playerView === "closed") {
       clearLyric();
       return;
     }
@@ -357,6 +373,13 @@
   function showStatus(message) {
     status.textContent = message;
     status.hidden = message === "";
+  }
+
+  function setPlayerView(view) {
+    playerView = view;
+    start.hidden = view !== "closed";
+    expand.hidden = view !== "collapsed";
+    controls.hidden = view !== "expanded";
   }
 
   function resetPositions() {
@@ -410,10 +433,10 @@
     try {
       await sound.play();
     } catch (error) {
-      if (error.name === "AbortError" || controls.hidden) return;
+      if (error.name === "AbortError" || playerView === "closed") return;
       showStatus(error.name === "NotAllowedError"
         ? "请点播放器的播放键继续。"
-        : "音频无法播放。请检查 MP3 直链，或收起后重试。");
+        : "音频无法播放。请检查 MP3 直链，或停止播放后重试。");
     }
   }
 
@@ -429,11 +452,20 @@
       return;
     }
     showStatus("");
-    controls.hidden = false;
-    start.hidden = true;
+    setPlayerView("expanded");
     if (!sound.hasAttribute("src")) sound.src = mp3Url;
     playTrack();
     sound.focus({ preventScroll: true });
+  });
+
+  collapse.addEventListener("click", () => {
+    setPlayerView("collapsed");
+    expand.focus({ preventScroll: true });
+  });
+
+  expand.addEventListener("click", () => {
+    setPlayerView("expanded");
+    collapse.focus({ preventScroll: true });
   });
 
   replay.addEventListener("click", restartTrack);
@@ -451,12 +483,11 @@
   });
 
   close.addEventListener("click", () => {
+    setPlayerView("closed");
     sound.pause();
     sound.currentTime = 0;
     started = false;
     shuffleOnPlay = true;
-    controls.hidden = true;
-    start.hidden = false;
     showStatus("");
     stopTick();
     start.focus({ preventScroll: true });
@@ -466,6 +497,7 @@
     if (shuffleOnPlay) resetPositions();
   });
   sound.addEventListener("playing", () => {
+    if (playerView === "closed") return;
     started = true;
     showStatus("");
     if (!animationFrame) animationFrame = requestAnimationFrame(tick);
@@ -476,17 +508,16 @@
     started = false;
     shuffleOnPlay = true;
     stopTick();
-    if (!controls.hidden && loopToggle.getAttribute("aria-pressed") === "true") {
+    if (playerView !== "closed" && loopToggle.getAttribute("aria-pressed") === "true") {
       restartTrack();
     }
   });
   sound.addEventListener("error", () => {
     if (!sound.hasAttribute("src")) return;
     started = false;
+    setPlayerView("closed");
     sound.removeAttribute("src");
     sound.load();
-    controls.hidden = true;
-    start.hidden = false;
     showStatus("音频读取失败。请检查 MP3 直链，再点播放配乐。");
     stopTick();
   });
