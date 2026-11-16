@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.1.0
-// @description  在指定 AO3 章节里点播配乐，按 LRC 时间戳在阅读窗口逐字显示浮动歌词。
+// @version      1.2.0
+// @description  在指定 AO3 章节里播放配乐，支持循环播放和按 LRC 时间戳逐字显示浮动歌词。
 // @match        https://archiveofourown.org/works/*
 // @connect      xinyanwang93-prog.github.io
 // @grant        GM_xmlhttpRequest
@@ -175,8 +175,8 @@
       }
       audio { display: block; width: 100%; height: 42px; }
       .actions {
-        display: flex;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 4px;
         padding-top: 5px;
       }
@@ -189,7 +189,11 @@
         font: inherit;
         cursor: pointer;
       }
-      .start { background: #f7d9b3; color: #2a1b11; font-weight: 650; }
+      .start, .loop-toggle[aria-pressed="true"] {
+        background: #f7d9b3;
+        color: #2a1b11;
+        font-weight: 650;
+      }
       button:disabled { opacity: .75; cursor: wait; }
       button:focus-visible { outline: 2px solid #ffdc93; outline-offset: 2px; }
       .status { max-width: 17rem; margin: 5px 3px 0; color: #ffdbab; }
@@ -202,6 +206,9 @@
         <audio controls preload="none"></audio>
         <div class="actions">
           <button type="button" class="replay">从头播放</button>
+          <button type="button" class="loop-toggle" aria-pressed="false">
+            循环播放 <span class="loop-state" aria-hidden="true">关</span>
+          </button>
           <button type="button" class="lyric-toggle">隐藏歌词</button>
           <button type="button" class="close">停止并收起</button>
         </div>
@@ -219,6 +226,8 @@
   const sound = layer.querySelector("audio");
   const title = layer.querySelector(".title");
   const replay = layer.querySelector(".replay");
+  const loopToggle = layer.querySelector(".loop-toggle");
+  const loopState = layer.querySelector(".loop-state");
   const lyricToggle = layer.querySelector(".lyric-toggle");
   const close = layer.querySelector(".close");
   const status = layer.querySelector(".status");
@@ -408,6 +417,12 @@
     }
   }
 
+  function restartTrack() {
+    resetPositions();
+    sound.currentTime = 0;
+    playTrack();
+  }
+
   start.addEventListener("click", () => {
     if (!cues.length) {
       loadLyrics();
@@ -421,10 +436,12 @@
     sound.focus({ preventScroll: true });
   });
 
-  replay.addEventListener("click", () => {
-    resetPositions();
-    sound.currentTime = 0;
-    playTrack();
+  replay.addEventListener("click", restartTrack);
+
+  loopToggle.addEventListener("click", () => {
+    const enabled = loopToggle.getAttribute("aria-pressed") !== "true";
+    loopToggle.setAttribute("aria-pressed", String(enabled));
+    loopState.textContent = enabled ? "开" : "关";
   });
 
   lyricToggle.addEventListener("click", () => {
@@ -455,9 +472,13 @@
   });
   sound.addEventListener("pause", stopTick);
   sound.addEventListener("ended", () => {
+    if (!sound.ended) return;
     started = false;
     shuffleOnPlay = true;
     stopTick();
+    if (!controls.hidden && loopToggle.getAttribute("aria-pressed") === "true") {
+      restartTrack();
+    }
   });
   sound.addEventListener("error", () => {
     if (!sound.hasAttribute("src")) return;
