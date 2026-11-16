@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.0.1
-// @description  在指定 AO3 章节里点播配乐，按 LRC 时间戳在阅读窗口随机显示歌词。
+// @version      1.1.0
+// @description  在指定 AO3 章节里点播配乐，按 LRC 时间戳在阅读窗口逐字显示浮动歌词。
 // @match        https://archiveofourown.org/works/*
 // @connect      xinyanwang93-prog.github.io
 // @grant        GM_xmlhttpRequest
@@ -42,6 +42,11 @@
     [.23, .80], [.77, .81], [.50, .32], [.50, .68],
   ];
   const longestAppearance = 5;
+  const secondsPerCharacter = .055;
+  const longestTyping = 1.6;
+  const graphemeSegmenter = typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const prose = chapters.querySelector(".userstuff[role='article'], .userstuff.module");
 
@@ -132,6 +137,7 @@
         max-width: min(78vw, 36rem);
         color: #fff0d3;
         font: 700 clamp(1.2rem, 2.9vw, 2.65rem)/1.17 Georgia, "Songti SC", "SimSun", serif;
+        direction: ltr;
         text-align: center;
         white-space: pre-line;
         overflow-wrap: anywhere;
@@ -143,6 +149,8 @@
         pointer-events: none;
         user-select: none;
       }
+      .lyric-character { opacity: 0; }
+      .lyric-character.revealed { opacity: 1; }
       .player {
         position: absolute;
         right: max(12px, env(safe-area-inset-right));
@@ -228,6 +236,8 @@
   let started = false;
   let shuffleOnPlay = false;
   let showLyrics = true;
+  let lyricCharacters = [];
+  let revealedCharacters = 0;
 
   function positionLyric() {
     if (activeIndex < 0) return;
@@ -258,7 +268,38 @@
     if (activeIndex < 0) return;
     activeIndex = -1;
     lyric.hidden = true;
-    lyric.textContent = "";
+    lyric.replaceChildren();
+    lyricCharacters = [];
+    revealedCharacters = 0;
+  }
+
+  function setLyricText(text) {
+    const graphemes = graphemeSegmenter
+      ? Array.from(graphemeSegmenter.segment(text), ({ segment }) => segment)
+      : Array.from(text);
+    lyricCharacters = graphemes.map(grapheme => {
+      const character = document.createElement("span");
+      character.className = "lyric-character";
+      character.textContent = grapheme;
+      return character;
+    });
+    // 先让整句占好位置，再逐字显示。
+    lyric.replaceChildren(...lyricCharacters);
+    revealedCharacters = 0;
+  }
+
+  function updateTypewriter(age, cueDuration) {
+    const count = lyricCharacters.length;
+    const typingDuration = Math.min((count - 1) * secondsPerCharacter, longestTyping, cueDuration * .6);
+    const visible = reducedMotion.matches || typingDuration <= 0
+      ? count
+      : Math.min(count, 1 + Math.floor(age / typingDuration * (count - 1)));
+    const from = Math.min(visible, revealedCharacters);
+    const until = Math.max(visible, revealedCharacters);
+    for (let index = from; index < until; index++) {
+      lyricCharacters[index].classList.toggle("revealed", index < visible);
+    }
+    revealedCharacters = visible;
   }
 
   function drawLyric() {
@@ -276,12 +317,13 @@
     const cue = cues[index];
     if (index !== activeIndex) {
       activeIndex = index;
-      lyric.textContent = cue.text;
+      setLyricText(cue.text);
       lyric.hidden = false;
       positionLyric();
     }
     const age = time - cue.start;
     const span = cue.end - cue.start;
+    updateTypewriter(age, span);
     const fadeIn = Math.min(.19, span / 4);
     const fadeOut = Math.min(.37, span / 3);
     const opacity = reducedMotion.matches
