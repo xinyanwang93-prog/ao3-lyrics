@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.4.0
-// @description  在指定 AO3 章节播放配乐，支持收起播放器、循环播放和按 LRC 时间戳逐字显示歌词。
+// @version      1.5.0
+// @description  在指定 AO3 章节按正文文字进入屏幕提示配乐，支持收起播放器、循环播放和逐字歌词。
 // @match        https://archiveofourown.org/works/*
+// @match        https://www.ao3-cn.com/works/*
 // @connect      xinyanwang93-prog.github.io
 // @grant        GM.xmlHttpRequest
 // @grant        GM_xmlhttpRequest
@@ -18,10 +19,12 @@
 
   // 每条左侧填对应章的 AO3 路径。file 填 MP3、LRC 共用的文件名，不带扩展名。
   // 单章作品可以填 "/works/作品数字ID"。
+  // triggerText 填一小段唯一的正文原文。进入屏幕时提示，留空则打开章节时提示。
   const CHAPTERS = {
     "/works/95113321/chapters/253989476": {
       title: "And Then is Heard No More",
       file: "Mili-And-Then-is-Heard-No-More",
+      triggerText: "这便是他们需要面对的现实。",
     },
   };
 
@@ -50,6 +53,111 @@
     : null;
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const prose = chapters.querySelector(".userstuff[role='article'], .userstuff.module");
+  const triggerText = typeof track.triggerText === "string" ? track.triggerText.replace(/\s/g, "") : "";
+
+  function findTriggerRanges(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return node.parentElement.closest("script, style, noscript, template, [hidden]")
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const parts = [];
+    let text = "";
+    for (let node; (node = walker.nextNode());) {
+      const content = node.data.replace(/\s/g, "");
+      parts.push({ node, start: text.length, length: content.length });
+      text += content;
+    }
+
+    const start = text.indexOf(triggerText);
+    if (start < 0) return [];
+    const end = start + triggerText.length;
+    const ranges = [];
+    for (const part of parts) {
+      if (part.start >= end) break;
+      if (part.start + part.length <= start) continue;
+      const offsets = [];
+      for (let offset = 0; offset < part.node.data.length; offset++) {
+        if (!/\s/.test(part.node.data[offset])) offsets.push(offset);
+      }
+      const from = Math.max(0, start - part.start);
+      const until = Math.min(part.length, end - part.start);
+      const range = document.createRange();
+      range.setStart(part.node, offsets[from]);
+      range.setEnd(part.node, offsets[until - 1] + 1);
+      ranges.push(range);
+    }
+    return ranges;
+  }
+
+  function waitForTriggerText() {
+    if (!triggerText) {
+      loadLyrics();
+      return;
+    }
+
+    const root = prose ?? chapters;
+    const viewport = window.visualViewport;
+    let ranges = null;
+    let pendingFrame = 0;
+
+    function scheduleCheck() {
+      if (!pendingFrame) pendingFrame = requestAnimationFrame(checkVisibility);
+    }
+
+    const textObserver = new MutationObserver(() => {
+      ranges = null;
+      scheduleCheck();
+    });
+    const layoutObserver = new ResizeObserver(scheduleCheck);
+
+    function checkVisibility() {
+      pendingFrame = 0;
+      if (document.visibilityState === "hidden") return;
+      if (ranges === null) ranges = findTriggerRanges(root);
+      const left = viewport?.offsetLeft ?? 0;
+      const top = viewport?.offsetTop ?? 0;
+      const right = left + (viewport?.width ?? document.documentElement.clientWidth);
+      const bottom = top + (viewport?.height ?? window.innerHeight);
+      const visible = ranges.some(range => {
+        const parent = range.startContainer.parentElement;
+        if (parent.checkVisibility) {
+          if (!parent.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+        } else if (getComputedStyle(parent).visibility !== "visible") {
+          return false;
+        }
+        return Array.from(range.getClientRects()).some(rect =>
+          rect.width > 0 && rect.height > 0 &&
+          rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top,
+        );
+      });
+      if (!visible) return;
+
+      textObserver.disconnect();
+      layoutObserver.disconnect();
+      document.removeEventListener("scroll", scheduleCheck, true);
+      document.removeEventListener("visibilitychange", scheduleCheck);
+      window.removeEventListener("resize", scheduleCheck);
+      viewport?.removeEventListener("scroll", scheduleCheck);
+      viewport?.removeEventListener("resize", scheduleCheck);
+      player.hidden = false;
+      loadLyrics();
+    }
+
+    textObserver.observe(root, {
+      childList: true, characterData: true, subtree: true, attributes: true,
+      attributeFilter: ["class", "style", "hidden", "open"],
+    });
+    layoutObserver.observe(root);
+    document.addEventListener("scroll", scheduleCheck, { passive: true, capture: true });
+    document.addEventListener("visibilitychange", scheduleCheck);
+    window.addEventListener("resize", scheduleCheck);
+    viewport?.addEventListener("scroll", scheduleCheck, { passive: true });
+    viewport?.addEventListener("resize", scheduleCheck, { passive: true });
+    scheduleCheck();
+  }
 
   function readLyrics(text) {
     const timeTag = /\[(\d+):([0-5]\d)(?:[.:](\d{1,3}))?\]/y;
@@ -252,6 +360,7 @@
   title.textContent = track.title;
   sound.setAttribute("aria-label", track.title);
   start.title = track.title;
+  player.hidden = Boolean(triggerText);
   document.body.append(host);
 
   let cues = [];
@@ -548,5 +657,5 @@
     positionLyric();
     drawLyric();
   });
-  loadLyrics();
+  waitForTriggerText();
 })();
