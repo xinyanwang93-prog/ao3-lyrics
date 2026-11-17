@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.3.0
+// @version      1.4.0
 // @description  在指定 AO3 章节播放配乐，支持收起播放器、循环播放和按 LRC 时间戳逐字显示歌词。
 // @match        https://archiveofourown.org/works/*
 // @connect      xinyanwang93-prog.github.io
+// @grant        GM.xmlHttpRequest
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
 // @noframes
@@ -392,38 +393,53 @@
     start.disabled = true;
     start.textContent = "正在读取歌词…";
     showStatus("");
+    let settled = false;
 
     function failed() {
+      if (settled) return;
+      settled = true;
       start.textContent = "重试读取歌词";
       start.disabled = false;
-      showStatus("歌词读取失败。请检查 LRC 直链、UTF-8 编码和脚本里的 @connect。");
+      showStatus("歌词读取失败。请检查 LRC 文件地址和脚本管理器的站点权限。");
+    }
+
+    function loaded(response) {
+      if (settled) return;
+      if (!(response?.status >= 200 && response.status < 300)) {
+        failed();
+        return;
+      }
+      const text = response.responseText ?? response.response;
+      const parsed = typeof text === "string" ? readLyrics(text) : [];
+      if (!parsed.some(cue => cue.text)) {
+        failed();
+        return;
+      }
+      settled = true;
+      cues = parsed;
+      resetPositions();
+      start.textContent = "播放配乐";
+      start.disabled = false;
     }
 
     try {
-      GM_xmlhttpRequest({
+      const request = {
         method: "GET",
         url: lrcUrl,
+        responseType: "text",
         anonymous: true,
         timeout: 15000,
-        onload(response) {
-          if (response.status < 200 || response.status >= 300) {
-            failed();
-            return;
-          }
-          const parsed = readLyrics(response.responseText);
-          if (!parsed.some(cue => cue.text)) {
-            failed();
-            return;
-          }
-          cues = parsed;
-          resetPositions();
-          start.textContent = "播放配乐";
-          start.disabled = false;
-        },
+        onload: loaded,
         onerror: failed,
         ontimeout: failed,
         onabort: failed,
-      });
+      };
+      if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") {
+        // Userscripts 和近期 Tampermonkey 支持此接口。
+        GM.xmlHttpRequest(request)?.then?.(loaded, failed);
+      } else {
+        GM_xmlhttpRequest(request);
+      }
     } catch {
       failed();
     }
