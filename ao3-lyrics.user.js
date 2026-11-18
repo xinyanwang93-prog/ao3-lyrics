@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.9.2
+// @version      1.10.1
 // @description  在 AO3 章节显示同步配乐与浮动歌词，支持点击正文播放照片动画。
 // @match        https://archiveofourown.org/works/*
 // @match        https://www.ao3-cn.com/works/*
@@ -231,8 +231,9 @@
     };
   }
 
-  function openChapterPhoto({ preset, url, opener, fallback, release }) {
-    // AO3 photo viewer revision 2
+  function openChapterPhoto({ preset, url, opener, fallback, release, onFrame }) {
+    // AO3 photo viewer revision 4
+    const shutterDuration = 260;
     const hostId = "ao3-chapter-photo-viewer";
     if (document.getElementById(hostId)) { release?.(); return; }
     const host = document.createElement("div");
@@ -244,9 +245,14 @@
         *,*::before,*::after{box-sizing:border-box}
         dialog{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;padding:0;overflow:hidden;color:#29231f;background:rgba(20,15,19,.48);font:14px/1.4 system-ui,"Microsoft YaHei",sans-serif;pointer-events:auto;overscroll-behavior:contain;touch-action:pinch-zoom}
         dialog[open]{display:grid;place-items:center}dialog::backdrop{background:transparent}
-        .flash{position:absolute;inset:0;background:#fff;z-index:2;pointer-events:none}
-        .flash.fire{animation:ao3-shutter 180ms ease-out both}
-        @keyframes ao3-shutter{0%,12%{opacity:1}100%{opacity:0}}
+        .flash{position:absolute;inset:0;background:#fff;opacity:0;z-index:2;pointer-events:none}
+        .flash.fire{animation:ao3-shutter ${shutterDuration}ms ease-out both}
+        @keyframes ao3-shutter{
+          0%{background-color:#19171c;opacity:.72;animation-timing-function:step-end}
+          20%,60%{background-color:#fff;opacity:1}
+          100%{background-color:#fff;opacity:0}
+        }
+        @media(prefers-reduced-motion:reduce){.flash.fire{animation:none;visibility:hidden}}
         figure{position:relative;display:grid;grid-template-rows:auto auto;margin:0;min-width:0;padding:0 clamp(9px,2.15vw,19px) clamp(18px,3.6vw,36px);background:linear-gradient(135deg,#fffdf6,#f1ecdf);color:#302823;border:1px solid #e4ded2;border-radius:3px;box-shadow:0 18px 56px #17101666,0 2px 8px #17101633}
         .bar{min-height:32px;display:flex;align-items:center;justify-content:space-between;gap:8px}
         .close{font:600 13px/1.2 system-ui,sans-serif;cursor:pointer;color:#3d3330;background:transparent;border:0;border-radius:4px;min-height:32px;min-width:42px;padding:2px 6px;white-space:nowrap}.close:hover{background:#ddd5ca}.close:focus-visible{outline:2px solid #245f9e}
@@ -269,7 +275,10 @@
           width:calc(max(var(--opening-width),min(60px,var(--room-width))) + 2 * var(--side) + 2px);
           padding:0 var(--side) var(--bottom);grid-template-columns:minmax(0,1fr);grid-template-rows:var(--toolbar) auto
         }
-        dialog[data-template=polaroid] .well{justify-self:center;width:var(--opening-width);aspect-ratio:var(--photo-ratio,1)}
+        dialog[data-template=polaroid] .well{place-self:start center;width:var(--opening-width);height:calc(var(--opening-width) / var(--photo-ratio,1));background:transparent}
+        dialog[data-template=polaroid] img{inset:auto;left:var(--photo-left,0%);top:var(--photo-top,0%);width:var(--photo-width,100%);height:auto;max-width:none;max-height:none;opacity:1}
+        .emulsion{display:none}
+        dialog[data-template=polaroid] .emulsion{display:block;position:absolute;inset:0;background:#000;pointer-events:none}
         dialog[data-template=polaroid] .close{flex:none}
         dialog[data-template=polaroid]:not([data-load-error]) .status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         dialog[data-template=polaroid][data-load-error] figure{width:min(320px,var(--paper-limit));grid-template-rows:auto;padding:6px var(--side)}
@@ -280,9 +289,9 @@
         @supports(height:100dvh){dialog[data-template=polaroid]{--view-height:100dvh}dialog[data-template=album] figure{width:min(690px,calc(100vw - 30px),calc(164dvh - 130px))}}
         @media(pointer:coarse){dialog[data-template=polaroid]{--toolbar:42px}.bar,.close{min-height:42px}.close{min-width:44px}}
       </style>
-      <dialog tabindex="-1" aria-label="章节照片"><div class="flash" hidden></div><p class="loading" role="status" hidden>正在载入照片…</p>
+      <dialog tabindex="-1" aria-label="章节照片"><div class="flash" aria-hidden="true" hidden></div><p class="loading" role="status" hidden>正在载入照片…</p>
         <figure hidden><div class="bar"><p class="status" role="status"></p><button class="close" type="button" aria-label="关闭照片" hidden>× 关闭</button></div>
-          <div class="well"><img alt="" draggable="false"></div></figure>
+          <div class="well"><img alt="" draggable="false"><span class="emulsion" aria-hidden="true"></span></div></figure>
       </dialog>`;
     const dialog = root.querySelector("dialog");
     const flash = root.querySelector(".flash"), paper = root.querySelector("figure");
@@ -290,12 +299,14 @@
     const image = root.querySelector("img"), close = root.querySelector(".close"), status = root.querySelector(".status");
     const polaroid = preset.templateId === "polaroid";
     const timing = photoTiming(preset);
+    const surface = polaroid ? root.querySelector(".emulsion") : image;
+    const sampleRemote = polaroid && (preset.photoEdges?.mode ?? "auto") === "auto" && /^https?:/i.test(url);
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     dialog.dataset.template = preset.templateId;
     image.alt = preset.title || (polaroid ? "拍立得照片" : "相册照片");
     const timers = new Set();
     let active = true, ready = false, holdEnded = false, revealing = false, failed = false;
-    let usedFallback = false, fallbackURL = null, effect = null;
+    let usedFallback = false, retriedDirect = false, fallbackURL = null, effect = null;
     function later(fn, ms) {
       const timer = setTimeout(() => { timers.delete(timer); if (active) fn(); }, ms);
       timers.add(timer);
@@ -327,39 +338,119 @@
       status.textContent = "照片未能载入。关闭后可再次点击正文重试。";
       showClose();
     }
+    function contentBounds() {
+      const width = image.naturalWidth, height = image.naturalHeight;
+      const full = {x:0,y:0,width,height};
+      const edges = preset.photoEdges;
+      if (edges?.mode === "original") return full;
+      if (edges?.mode === "manual") {
+        const left = Number(edges.left), right = Number(edges.right);
+        if (![left,right].every(n=>Number.isFinite(n) && n >= 0) || left + right >= 100) return full;
+        return {x:width * left / 100,y:0,width:width * (100 - left - right) / 100,height};
+      }
+      const canvas = document.createElement("canvas");
+      let context;
+      // Sample full strips across the picture. A dark corner alone is insufficient.
+      function margins(horizontal) {
+        const span = horizontal ? width : height;
+        const count = Math.min(4096,span);
+        const across = Math.min(80,horizontal ? height : width);
+        canvas.width = horizontal ? count : across;
+        canvas.height = horizontal ? across : count;
+        context.imageSmoothingEnabled = false;
+        context.drawImage(image,0,0,canvas.width,canvas.height);
+        const pixels = context.getImageData(0,0,canvas.width,canvas.height).data;
+        const tolerance = Math.floor(across / 64);
+        function line(index) {
+          let transparent = 0, black = 0, bright = 0;
+          let p = horizontal ? index * 4 : index * across * 4;
+          const step = horizontal ? count * 4 : 4;
+          for (let j=0;j<across;j++,p+=step) {
+            if (pixels[p+3] <= 8) { transparent++; continue; }
+            const high = Math.max(pixels[p],pixels[p+1],pixels[p+2]);
+            const low = Math.min(pixels[p],pixels[p+1],pixels[p+2]);
+            if (high <= 17 && high - low <= 7) black++;
+            if (pixels[p+3] >= 80 && high >= 32) bright++;
+          }
+          return {empty:transparent + black >= across - tolerance, clear:transparent === across, bright};
+        }
+        function edge(fromEnd) {
+          const at = i => line(fromEnd ? count-1-i : i);
+          let size = 0, clearSize = 0;
+          while (size < count) {
+            const strip = at(size);
+            if (!strip.empty) break;
+            if (strip.clear && clearSize === size) clearSize++;
+            size++;
+          }
+          if (size === count) return {size:0,clearSize:clearSize===count ? 0 : clearSize,sharp:false};
+          const lookAhead = Math.min(count-size,Math.max(2,Math.ceil(count*0.003)));
+          let sharp = false;
+          for (let i=0;i<lookAhead;i++) {
+            if (at(size+i).bright >= across*0.38) { sharp=true; break; }
+          }
+          return {size,clearSize,sharp};
+        }
+        const a=edge(false), b=edge(true);
+        const smaller = Math.min(a.size,b.size), larger = Math.max(a.size,b.size);
+        const blackPair = smaller >= Math.max(2,Math.ceil(count*0.002)) &&
+          (a.sharp || a.clearSize===a.size) && (b.sharp || b.clearSize===b.size) &&
+          larger-smaller <= Math.max(3,larger*0.20);
+        const before = blackPair ? a.size : a.clearSize;
+        const after = blackPair ? b.size : b.clearSize;
+        if (count-before-after < 1) return [0,0];
+        return [Math.round(before*span/count),Math.round(after*span/count)];
+      }
+      try {
+        context = canvas.getContext("2d",{willReadFrequently:true});
+        if (!context) return {...full,unreadable:true};
+        const [left,right]=margins(true), [top,bottom]=margins(false);
+        if (width-left-right < 1 || height-top-bottom < 1) return full;
+        return {x:left,y:top,width:width-left-right,height:height-top-bottom};
+      } catch {
+        // Hosts can allow display but deny pixel reads. Manual trim works in that case.
+        return {...full,unreadable:true};
+      } finally { canvas.width = canvas.height = 1; }
+    }
     function reveal() {
       if (!active || !ready || !holdEnded || revealing || failed) return;
       revealing = true;
       status.textContent = "";
       const fullDuration = polaroid ? timing.revealSeconds * 1000 : 1450;
       const duration = reduced ? Math.min(160,fullDuration) : fullDuration;
-      const first = polaroid || reduced ? { opacity:0 } : { opacity:0, filter:"blur(9px)", transform:"scale(1.035)" };
-      const final = { opacity:1, filter:"none", transform:"none" };
+      const first = polaroid ? { opacity:1 } : reduced ? { opacity:0 } : { opacity:0, filter:"blur(9px)", transform:"scale(1.035)" };
+      const final = { opacity:polaroid ? 0 : 1, filter:"none", transform:"none" };
       const finish = () => {
         if (!active) return;
-        image.style.opacity = "1"; image.style.filter = "none"; image.style.transform = "none";
+        Object.assign(surface.style,final);
         effect?.cancel(); effect = null;
         showClose();
       };
       if (duration === 0) { finish(); return; }
-      if (typeof image.animate === "function") {
-        effect = image.animate([first,final],{duration,easing:"ease-in-out",fill:"both"});
+      if (typeof surface.animate === "function") {
+        effect = surface.animate([first,final],{duration,easing:"ease-in-out",fill:"both"});
         effect.finished.then(finish,()=>{});
       } else {
-        Object.assign(image.style,first);
-        image.getBoundingClientRect();
-        image.style.transition = `opacity ${duration}ms ease-in-out, filter ${duration}ms, transform ${duration}ms`;
-        Object.assign(image.style,final);
+        Object.assign(surface.style,first);
+        surface.getBoundingClientRect();
+        surface.style.transition = `opacity ${duration}ms ease-in-out, filter ${duration}ms, transform ${duration}ms`;
+        Object.assign(surface.style,final);
         later(finish,duration);
       }
     }
     function presentPaper() {
       if (failed || !flash.hidden) return;
-      if (polaroid) {
-        if (!image.naturalWidth || !image.naturalHeight) { if (paper.hidden) loading.hidden = false; return; }
-        paper.style.setProperty("--photo-ratio",String(image.naturalWidth / image.naturalHeight));
-      }
+      if (polaroid && !ready) { loading.hidden = false; return; }
       if (!paper.hidden) return;
+      if (polaroid) {
+        // Measuring image edges can take a frame, so wait until the shutter has finished.
+        const bounds = contentBounds();
+        paper.style.setProperty("--photo-ratio",String(bounds.width / bounds.height));
+        paper.style.setProperty("--photo-width",(100 * image.naturalWidth / bounds.width)+"%");
+        paper.style.setProperty("--photo-left",(-100 * bounds.x / bounds.width)+"%");
+        paper.style.setProperty("--photo-top",(-100 * bounds.y / bounds.height)+"%");
+        onFrame?.(bounds,image.naturalWidth,image.naturalHeight);
+      }
       loading.hidden = true;
       paper.hidden = false;
       function endHold() {
@@ -381,28 +472,45 @@
     else { dialog.setAttribute("open",""); dialog.setAttribute("aria-modal","true"); }
     dialog.focus({preventScroll:true});
     if (polaroid && !reduced) {
-      flash.hidden = false; flash.className = "flash fire";
-      later(()=>{flash.hidden = true; presentPaper();},180);
+      const finishShutter = () => {
+        if (!active || flash.hidden) return;
+        flash.hidden = true;
+        presentPaper();
+      };
+      flash.addEventListener("animationend",finishShutter,{once:true});
+      flash.addEventListener("animationcancel",finishShutter,{once:true});
+      flash.className = "flash fire";
+      flash.hidden = false;
+      // Some user styles disable CSS animations without dispatching an end event.
+      later(finishShutter,shutterDuration + 240);
     }
     else presentPaper();
     const loadTimeout = later(showError,25000);
     image.onload = () => {
-      if (!active || failed) return;
+      if (!active || failed || ready) return;
       if (polaroid && (!image.naturalWidth || !image.naturalHeight)) { showError(); return; }
       clearTimeout(loadTimeout); timers.delete(loadTimeout);
       ready = true; presentPaper(); reveal();
     };
     image.onerror = async () => {
       if (!active || failed) return;
-      if (!fallback || usedFallback) { showError(); return; }
-      usedFallback = true;
-      try {
-        const blob = await fallback();
-        if (!active || failed) return;
-        fallbackURL = URL.createObjectURL(blob); image.src = fallbackURL;
-      } catch { showError(); }
+      if (fallback && !usedFallback) {
+        usedFallback = true;
+        try {
+          const blob = await fallback();
+          if (!active || failed) return;
+          fallbackURL = URL.createObjectURL(blob);
+          image.removeAttribute("crossorigin"); image.src = fallbackURL; return;
+        } catch { if (!active || failed) return; }
+      }
+      if (sampleRemote && !retriedDirect) {
+        retriedDirect = true;
+        image.removeAttribute("crossorigin"); image.src = url; return;
+      }
+      showError();
     };
     image.referrerPolicy = "no-referrer";
+    if (sampleRemote) image.crossOrigin = "anonymous";
     image.src = url;
   }
   // END AO3 chapter animations
