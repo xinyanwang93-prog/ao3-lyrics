@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.5.0
+// @version      1.6.1
 // @description  在指定 AO3 章节按正文文字进入屏幕提示配乐，支持收起播放器、循环播放和逐字歌词。
 // @match        https://archiveofourown.org/works/*
 // @match        https://www.ao3-cn.com/works/*
@@ -10,6 +10,8 @@
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
 // @noframes
+// @updateURL    https://xinyanwang93-prog.github.io/ao3-lyrics/ao3-lyrics.user.js
+// @downloadURL  https://xinyanwang93-prog.github.io/ao3-lyrics/ao3-lyrics.user.js
 // ==/UserScript==
 
 (() => {
@@ -17,29 +19,40 @@
 
   const MEDIA_BASE = "https://xinyanwang93-prog.github.io/ao3-lyrics/media/";
 
-  // 每条左侧填对应章的 AO3 路径。file 填 MP3、LRC 共用的文件名，不带扩展名。
-  // 单章作品可以填 "/works/作品数字ID"。
-  // triggerText 填一小段唯一的正文原文。进入屏幕时提示，留空则打开章节时提示。
+  // AO3 preset editor format 1
   const CHAPTERS = {
     "/works/95113321/chapters/253989476": {
-      title: "And Then is Heard No More",
-      file: "Mili-And-Then-is-Heard-No-More",
-      triggerText: "这便是他们需要面对的现实。",
+      "id": "legacy:/works/95113321/chapters/253989476:0",
+      "title": "And Then is Heard No More",
+      "audio": "Mili-And-Then-is-Heard-No-More.mp3",
+      "lyrics": "Mili-And-Then-is-Heard-No-More.lrc",
+      "triggerText": "这便是他们需要面对的现实。"
     },
+    "/works/95113321/chapters/254491486": {
+      "id": "32802e09-a125-453a-8adb-965240c2878b",
+      "title": "And Then is Heard No More",
+      "audio": "Mili-And-Then-is-Heard-No-More.mp3",
+      "lyrics": "Mili-And-Then-is-Heard-No-More.lrc",
+      "triggerText": ""
+    }
   };
 
   const hostId = "ao3-chapter-lyrics";
   const chapterPath = location.pathname.replace(/\/$/, "");
-  const track = CHAPTERS[chapterPath];
+  const chapterEntry = CHAPTERS[chapterPath];
   const chapters = document.querySelector("#workskin #chapters");
-  if (!MEDIA_BASE || !track || !chapters || document.getElementById(hostId)) return;
+  if (!MEDIA_BASE || !chapterEntry || !chapters || document.getElementById(hostId)) return;
   if (new URLSearchParams(location.search).get("view_full_work") === "true") return;
 
   const base = new URL(MEDIA_BASE.replace(/\/?$/, "/"));
   if (base.protocol !== "https:") return;
-  const filename = encodeURIComponent(track.file);
-  const mp3Url = new URL(filename + ".mp3", base).href;
-  const lrcUrl = new URL(filename + ".lrc", base).href;
+  const tracks = Array.isArray(chapterEntry) ? chapterEntry : [chapterEntry];
+
+  function mediaUrl(path) {
+    const parts = path.split("/");
+    if (parts.some(part => !part || part === "." || part === "..")) throw new Error("无效的媒体路径");
+    return new URL(parts.map(encodeURIComponent).join("/"), base).href;
+  }
 
   const anchorPoints = [
     [.18, .16], [.82, .19], [.15, .47], [.85, .51],
@@ -53,9 +66,7 @@
     : null;
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const prose = chapters.querySelector(".userstuff[role='article'], .userstuff.module");
-  const triggerText = typeof track.triggerText === "string" ? track.triggerText.replace(/\s/g, "") : "";
-
-  function findTriggerRanges(root) {
+  function findTriggerRanges(root, triggerText) {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         return node.parentElement.closest("script, style, noscript, template, [hidden]")
@@ -77,7 +88,7 @@
     const ranges = [];
     for (const part of parts) {
       if (part.start >= end) break;
-      if (part.start + part.length <= start) continue;
+      if (!part.length || part.start + part.length <= start) continue;
       const offsets = [];
       for (let offset = 0; offset < part.node.data.length; offset++) {
         if (!/\s/.test(part.node.data[offset])) offsets.push(offset);
@@ -92,9 +103,10 @@
     return ranges;
   }
 
-  function waitForTriggerText() {
+  function waitForTriggerText(track) {
+    const triggerText = (track.triggerText ?? "").replace(/\s/g, "");
     if (!triggerText) {
-      loadLyrics();
+      unlockTrack(track);
       return;
     }
 
@@ -116,7 +128,7 @@
     function checkVisibility() {
       pendingFrame = 0;
       if (document.visibilityState === "hidden") return;
-      if (ranges === null) ranges = findTriggerRanges(root);
+      if (ranges === null) ranges = findTriggerRanges(root, triggerText);
       const left = viewport?.offsetLeft ?? 0;
       const top = viewport?.offsetTop ?? 0;
       const right = left + (viewport?.width ?? document.documentElement.clientWidth);
@@ -142,8 +154,7 @@
       window.removeEventListener("resize", scheduleCheck);
       viewport?.removeEventListener("scroll", scheduleCheck);
       viewport?.removeEventListener("resize", scheduleCheck);
-      player.hidden = false;
-      loadLyrics();
+      unlockTrack(track);
     }
 
     textObserver.observe(root, {
@@ -276,6 +287,8 @@
         font-size: .8125rem;
       }
       .controls { width: min(18rem, calc(100vw - 42px)); }
+      .pick-track { display: block; margin-bottom: 5px; }
+      .pick-track select { max-width: min(16rem, 65vw); font: inherit; }
       .player-heading {
         display: flex;
         align-items: flex-start;
@@ -318,6 +331,7 @@
     </style>
     <div class="lyric" aria-hidden="true" hidden></div>
     <div class="player" role="group" aria-label="章节配乐">
+      <label class="pick-track" hidden>曲目 <select aria-label="可播放的曲目"></select></label>
       <button type="button" class="start" disabled>正在读取歌词…</button>
       <button type="button" class="expand" aria-controls="ao3-lyrics-controls" aria-expanded="false" hidden>展开播放器</button>
       <div class="controls" id="ao3-lyrics-controls" hidden>
@@ -356,13 +370,14 @@
   const close = layer.querySelector(".close");
   const status = layer.querySelector(".status");
   const lyric = layer.querySelector(".lyric");
+  const picker = layer.querySelector(".pick-track");
+  const trackSelect = picker.querySelector("select");
 
-  title.textContent = track.title;
-  sound.setAttribute("aria-label", track.title);
-  start.title = track.title;
-  player.hidden = Boolean(triggerText);
+  player.hidden = true;
   document.body.append(host);
 
+  let currentTrack = null;
+  let requestNumber = 0;
   let cues = [];
   let positions = [];
   let activeIndex = -1;
@@ -490,7 +505,40 @@
     start.hidden = view !== "closed";
     expand.hidden = view !== "collapsed";
     controls.hidden = view !== "expanded";
+    picker.hidden = view === "collapsed" || trackSelect.options.length < 2;
   }
+
+  function unlockTrack(track) {
+    const option = document.createElement("option");
+    option.value = String(tracks.indexOf(track));
+    option.textContent = track.title;
+    trackSelect.append(option);
+    player.hidden = false;
+    picker.hidden = playerView === "collapsed" || trackSelect.options.length < 2;
+    if (!currentTrack || (track.triggerText && playerView === "closed")) selectTrack(track);
+  }
+
+  function selectTrack(track) {
+    if (currentTrack === track) return;
+    currentTrack = track;
+    trackSelect.value = String(tracks.indexOf(track));
+    started = false;
+    if (sound.hasAttribute("src")) {
+      sound.pause();
+      sound.removeAttribute("src");
+      sound.load();
+    }
+    stopTick();
+    cues = [];
+    positions = [];
+    title.textContent = track.title;
+    start.title = track.title;
+    sound.setAttribute("aria-label", track.title);
+    setPlayerView("closed");
+    loadLyrics();
+  }
+
+  trackSelect.addEventListener("change", () => selectTrack(tracks[Number(trackSelect.value)]));
 
   function resetPositions() {
     positions = randomPositions(cues, positions);
@@ -499,13 +547,14 @@
   }
 
   function loadLyrics() {
+    const number = ++requestNumber;
     start.disabled = true;
     start.textContent = "正在读取歌词…";
     showStatus("");
     let settled = false;
 
     function failed() {
-      if (settled) return;
+      if (settled || number !== requestNumber) return;
       settled = true;
       start.textContent = "重试读取歌词";
       start.disabled = false;
@@ -513,7 +562,7 @@
     }
 
     function loaded(response) {
-      if (settled) return;
+      if (settled || number !== requestNumber) return;
       if (!(response?.status >= 200 && response.status < 300)) {
         failed();
         return;
@@ -534,7 +583,7 @@
     try {
       const request = {
         method: "GET",
-        url: lrcUrl,
+        url: mediaUrl(currentTrack.lyrics ?? currentTrack.file + ".lrc"),
         responseType: "text",
         anonymous: true,
         timeout: 15000,
@@ -578,7 +627,7 @@
     }
     showStatus("");
     setPlayerView("expanded");
-    if (!sound.hasAttribute("src")) sound.src = mp3Url;
+    if (!sound.hasAttribute("src")) sound.src = mediaUrl(currentTrack.audio ?? currentTrack.file + ".mp3");
     playTrack();
     sound.focus({ preventScroll: true });
   });
@@ -657,5 +706,5 @@
     positionLyric();
     drawLyric();
   });
-  waitForTriggerText();
+  tracks.forEach(waitForTriggerText);
 })();
