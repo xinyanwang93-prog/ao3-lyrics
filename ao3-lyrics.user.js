@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.9.1
+// @version      1.9.2
 // @description  在 AO3 章节显示同步配乐与浮动歌词，支持点击正文播放照片动画。
 // @match        https://archiveofourown.org/works/*
 // @match        https://www.ao3-cn.com/works/*
@@ -46,7 +46,7 @@
       "image": "uploads/0e1f0eb53305693020a1d34d/微信图片_20261113234719_50_18.png",
       "blackHoldSeconds": 1,
       "revealSeconds": 3,
-      "triggerText": "茄子——"
+      "triggerText": "茄子"
     }
   };
   queueMicrotask(() => installChapterAnimations(ANIMATIONS, MEDIA_BASE));
