@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.10.1
+// @version      1.10.2
 // @description  在 AO3 章节显示同步配乐与浮动歌词，支持点击正文播放照片动画。
 // @match        https://archiveofourown.org/works/*
 // @match        https://www.ao3-cn.com/works/*
@@ -28,12 +28,12 @@
       "lyrics": "Mili-And-Then-is-Heard-No-More.lrc",
       "triggerText": "这便是他们需要面对的现实。"
     },
-    "/works/95113321/chapters/254491486": {
+    "/works/63298294/chapters/197819821": {
       "id": "32802e09-a125-453a-8adb-965240c2878b",
-      "title": "And Then is Heard No More",
-      "audio": "Mili-And-Then-is-Heard-No-More.mp3",
-      "lyrics": "Mili-And-Then-is-Heard-No-More.lrc",
-      "triggerText": ""
+      "title": "What a time to be alive",
+      "audio": "uploads/11d29c52fb4779a176889260/Fall-Out-Boy-What-a-Time-To-Be-Alive.mp3",
+      "lyrics": "uploads/ab5fee034a4ea5f15239df3e/Fall-Out-Boy-What-a-Time-To-Be-Alive.lrc",
+      "triggerText": "好了！那么开始吧，小帅哥。"
     }
   };
 
