@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AO3 章节配乐与浮动歌词
 // @namespace    ao3-chapter-lyrics
-// @version      1.6.1
-// @description  在指定 AO3 章节按正文文字进入屏幕提示配乐，支持收起播放器、循环播放和逐字歌词。
+// @version      1.9.1
+// @description  在 AO3 章节显示同步配乐与浮动歌词，支持点击正文播放照片动画。
 // @match        https://archiveofourown.org/works/*
 // @match        https://www.ao3-cn.com/works/*
 // @connect      xinyanwang93-prog.github.io
@@ -19,7 +19,7 @@
 
   const MEDIA_BASE = "https://xinyanwang93-prog.github.io/ao3-lyrics/media/";
 
-  // AO3 preset editor format 1
+  // AO3 preset editor format 3
   const CHAPTERS = {
     "/works/95113321/chapters/253989476": {
       "id": "legacy:/works/95113321/chapters/253989476:0",
@@ -36,6 +36,376 @@
       "triggerText": ""
     }
   };
+
+  // BEGIN AO3 chapter animations
+  const ANIMATIONS = {
+    "/works/63298294/chapters/197819821": {
+      "id": "ca668fd2-86b9-4108-9bd0-954464c2f13d",
+      "title": "拍立得1",
+      "templateId": "polaroid",
+      "image": "uploads/0e1f0eb53305693020a1d34d/微信图片_20261113234719_50_18.png",
+      "blackHoldSeconds": 1,
+      "revealSeconds": 3,
+      "triggerText": "茄子——"
+    }
+  };
+  queueMicrotask(() => installChapterAnimations(ANIMATIONS, MEDIA_BASE));
+
+  function installChapterAnimations(config, mediaBase) {
+    const path = location.pathname.replace(/\/$/, "");
+    const entry = config[path];
+    if (!entry || new URLSearchParams(location.search).get("view_full_work") === "true") return;
+    const chapters = document.querySelector("#workskin #chapters");
+    if (!chapters) {
+      const waiting = new MutationObserver(()=>{
+        if (!document.querySelector("#workskin #chapters")) return;
+        waiting.disconnect();
+        installChapterAnimations(config,mediaBase);
+      });
+      waiting.observe(document.documentElement,{childList:true,subtree:true});
+      return;
+    }
+    if (chapters.hasAttribute("data-ao3-photo-events")) return;
+    const triggers = (Array.isArray(entry) ? entry : [entry]).map(preset => ({
+      preset, needle:(preset.triggerText || "").replace(/\s/g,"")
+    })).filter(item => item.needle && item.preset.image);
+    if (!triggers.length) return;
+    // Bind longer phrases first when two phrases overlap at the same point.
+    triggers.sort((left,right)=>right.needle.length-left.needle.length);
+    const actions = new Map(triggers.map(({preset})=>[preset.id,preset]));
+    const selector = "[data-ao3-photo-trigger]";
+    const excluded = "a,button,input,textarea,select,summary,script,style,noscript,template,[hidden],[aria-hidden='true'],[contenteditable]:not([contenteditable='false']),.landmark,.preface,.notes,.summary,.end.notes";
+    const proseSelector = ".userstuff[role='article'], .userstuff.module, .chapter > .userstuff, #chapters > .userstuff";
+    const style = document.createElement("style");
+    style.textContent = `
+      #workskin [data-ao3-photo-trigger]{color:var(--ao3-photo-ink,#155eae)!important;cursor:pointer!important;text-decoration:underline!important;text-decoration-thickness:1px!important;text-underline-offset:.16em;border-radius:2px}
+      #workskin [data-ao3-photo-trigger]:focus-visible{outline:2px solid currentColor!important;outline-offset:3px}
+      @media(forced-colors:active){#workskin [data-ao3-photo-trigger]{color:LinkText!important}}
+    `;
+    (document.head || document.documentElement).append(style);
+    chapters.setAttribute("data-ao3-photo-events","true");
+
+    function blueInk(parent) {
+      for (let el=parent; el; el=el.parentElement) {
+        const color = getComputedStyle(el).backgroundColor;
+        const rgba = color.match(/[\d.]+/g);
+        if (!rgba || rgba.length < 3 || (rgba[3] !== undefined && Number(rgba[3]) < .5)) continue;
+        const [r,g,b] = rgba.map(Number);
+        return (.2126*r + .7152*g + .0722*b) < 125 ? "#9ccfff" : "#155eae";
+      }
+      return getComputedStyle(parent).colorScheme === "dark" ? "#9ccfff" : "#155eae";
+    }
+    function proseGroups(root) {
+      const groups = [];
+      const walker = document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+      let group = null;
+      for (let node; (node = walker.nextNode());) {
+        const parent = node.parentElement;
+        if (!parent || parent.closest(excluded)) { group = null; continue; }
+        const chunk = node.data.replace(/\s/g,"");
+        if (!chunk) continue;
+        const block = parent.closest("p,li,blockquote,div,td,th,pre,h1,h2,h3,h4,h5,h6,figcaption") || root;
+        if (group?.block !== block) {
+          group = {block,text:"",parts:[],occupied:[]};
+          groups.push(group);
+        }
+        const start = group.text.length;
+        group.text += chunk;
+        group.parts.push({ node, start, end:group.text.length });
+      }
+      return groups;
+    }
+    function collectPieces(groups) {
+      const pieces = new Map();
+      for (const {preset,needle} of triggers) {
+        let matched = false;
+        for (const group of groups) {
+          let from = 0;
+          while (!matched) {
+            const start = group.text.indexOf(needle,from);
+            if (start === -1) break;
+            const end = start + needle.length;
+            if (group.occupied.some(item=>start < item.end && end > item.start)) { from = start + 1; continue; }
+            group.occupied.push({start,end});
+            let first = true;
+            for (const part of group.parts) {
+              if (part.start >= end) break;
+              if (part.end <= start) continue;
+              const offsets = [];
+              for (let i=0; i<part.node.length; i++) if (!/\s/.test(part.node.data[i])) offsets.push(i);
+              const left = offsets[Math.max(0,start-part.start)];
+              const right = offsets[Math.min(part.end,end)-part.start-1]+1;
+              if (!pieces.has(part.node)) pieces.set(part.node,[]);
+              pieces.get(part.node).push({left,right,first,preset});
+              first = false;
+            }
+            matched = true;
+          }
+          if (matched) break;
+        }
+      }
+      return pieces;
+    }
+    function refresh() {
+      observer.disconnect();
+      try {
+        for (const old of chapters.querySelectorAll(selector)) old.replaceWith(...old.childNodes);
+        let scope = proseSelector;
+        let candidates = [...chapters.querySelectorAll(scope)];
+        if (!candidates.length) { scope = ".userstuff"; candidates = [...chapters.querySelectorAll(scope)]; }
+        const roots = candidates.filter(root =>
+          !root.closest(".preface,.notes,.summary,[hidden]") && !root.parentElement?.closest(scope));
+        const pieces = collectPieces(roots.flatMap(proseGroups));
+        for (const [node,list] of pieces) {
+          const ink = blueInk(node.parentElement);
+          for (const part of list.sort((a,b)=>b.left-a.left)) {
+            if (part.right < node.length) node.splitText(part.right);
+            const matched = part.left ? node.splitText(part.left) : node;
+            const mark = document.createElement("span");
+            mark.dataset.ao3PhotoTrigger = part.preset.id;
+            mark.style.setProperty("--ao3-photo-ink",ink);
+            if (part.first) {
+              mark.setAttribute("role","button"); mark.tabIndex = 0;
+              mark.setAttribute("aria-haspopup","dialog");
+              mark.setAttribute("aria-label",part.preset.triggerText+"，打开照片");
+            } else mark.setAttribute("aria-hidden","true");
+            matched.replaceWith(mark); mark.append(matched);
+          }
+        }
+      } finally { observer.observe(chapters,{childList:true,characterData:true,attributes:true,attributeFilter:["hidden","aria-hidden","class","role"],subtree:true}); }
+    }
+    function fetchPhoto(url) {
+      return new Promise((resolve,reject)=>{
+        const loaded = event => {
+          if (event?.status >= 200 && event.status < 300 && event.response?.size) resolve(event.response);
+          else reject(Error("无法读取照片"));
+        };
+        const request = {method:"GET",url,responseType:"blob",anonymous:true,timeout:15000,
+          onload:loaded,onerror:reject,ontimeout:reject,onabort:reject};
+        if (typeof GM !== "undefined" && typeof GM.xmlHttpRequest === "function") {
+          GM.xmlHttpRequest(request)?.then?.(loaded,reject);
+        } else if (typeof GM_xmlhttpRequest === "function") GM_xmlhttpRequest(request);
+        else reject(Error("无法读取照片"));
+      });
+    }
+    function activate(event) {
+      if (location.pathname.replace(/\/$/,"") !== path || new URLSearchParams(location.search).get("view_full_work") === "true") return;
+      const mark = event.target.closest?.(selector);
+      if (!mark || !chapters.contains(mark)) return;
+      if (event.type === "keydown" && (event.repeat || (event.key !== "Enter" && event.key !== " "))) return;
+      if (event.type === "click" && window.getSelection()?.isCollapsed === false) return;
+      const preset = actions.get(mark.dataset.ao3PhotoTrigger);
+      if (!preset) return;
+      event.preventDefault();
+      const url = new URL(preset.image.split("/").map(encodeURIComponent).join("/"),mediaBase).href;
+      const opener = mark.tabIndex === 0 ? mark : [...chapters.querySelectorAll(selector)].find(
+        part=>part.tabIndex===0 && part.dataset.ao3PhotoTrigger===preset.id);
+      openChapterPhoto({preset,url,opener,fallback:()=>fetchPhoto(url)});
+    }
+    let scheduled = false;
+    const observer = new MutationObserver(()=>{
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(()=>{scheduled=false;refresh();});
+    });
+    chapters.addEventListener("click",activate);
+    chapters.addEventListener("keydown",activate);
+    refresh();
+  }
+
+  function photoTiming(preset, validate = false) {
+    if (preset.templateId !== "polaroid") return {};
+    function seconds(raw, defaultValue, label) {
+      if (raw == null) return defaultValue;
+      const value = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "") ? Number(raw) : NaN;
+      if (Number.isFinite(value) && value >= 0 && value * 1000 <= 2147483647) return value;
+      if (validate) {
+        if (value * 1000 > 2147483647) throw Error(label + "超出浏览器可计时的范围。");
+        throw Error("请填写有效的" + label + "。秒数须大于或等于 0，可使用小数。");
+      }
+      return defaultValue;
+    }
+    return {
+      blackHoldSeconds: seconds(preset.blackHoldSeconds, 8, "黑屏停留时间"),
+      revealSeconds: seconds(preset.revealSeconds, 2, "显影持续时间")
+    };
+  }
+
+  function openChapterPhoto({ preset, url, opener, fallback, release }) {
+    // AO3 photo viewer revision 2
+    const hostId = "ao3-chapter-photo-viewer";
+    if (document.getElementById(hostId)) { release?.(); return; }
+    const host = document.createElement("div");
+    host.id = hostId;
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        :host{all:initial;position:fixed;inset:0;z-index:2147483646;pointer-events:none;color-scheme:light}
+        *,*::before,*::after{box-sizing:border-box}
+        dialog{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;padding:0;overflow:hidden;color:#29231f;background:rgba(20,15,19,.48);font:14px/1.4 system-ui,"Microsoft YaHei",sans-serif;pointer-events:auto;overscroll-behavior:contain;touch-action:pinch-zoom}
+        dialog[open]{display:grid;place-items:center}dialog::backdrop{background:transparent}
+        .flash{position:absolute;inset:0;background:#fff;z-index:2;pointer-events:none}
+        .flash.fire{animation:ao3-shutter 180ms ease-out both}
+        @keyframes ao3-shutter{0%,12%{opacity:1}100%{opacity:0}}
+        figure{position:relative;display:grid;grid-template-rows:auto auto;margin:0;min-width:0;padding:0 clamp(9px,2.15vw,19px) clamp(18px,3.6vw,36px);background:linear-gradient(135deg,#fffdf6,#f1ecdf);color:#302823;border:1px solid #e4ded2;border-radius:3px;box-shadow:0 18px 56px #17101666,0 2px 8px #17101633}
+        .bar{min-height:32px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+        .close{font:600 13px/1.2 system-ui,sans-serif;cursor:pointer;color:#3d3330;background:transparent;border:0;border-radius:4px;min-height:32px;min-width:42px;padding:2px 6px;white-space:nowrap}.close:hover{background:#ddd5ca}.close:focus-visible{outline:2px solid #245f9e}
+        .status{margin:0;font-size:12px;color:#61544d;overflow-wrap:anywhere}
+        .well{position:relative;overflow:hidden;background:#000}
+        img{display:block;position:absolute;inset:0;width:100%;height:100%;object-fit:contain;image-orientation:from-image;opacity:0}
+        .loading{margin:0;padding:.55em .95em;color:white;background:#282222de;border-radius:5px}
+        dialog[data-template=polaroid]{
+          --view-height:100vh;
+          --edge-x:max(15px,env(safe-area-inset-left,0px),env(safe-area-inset-right,0px));
+          --edge-y:max(12px,env(safe-area-inset-top,0px),env(safe-area-inset-bottom,0px));
+          --side:clamp(9px,2.15vw,19px);--bottom:clamp(18px,3.6vw,36px);--toolbar:32px;
+          --paper-limit:min(690px,calc(100vw - 2 * var(--edge-x)));
+          --room-width:max(1px,calc(var(--paper-limit) - 2 * var(--side) - 2px));
+          --room-height:max(1px,calc(var(--view-height) - 2 * var(--edge-y) - var(--toolbar) - var(--bottom) - 2px));
+          height:var(--view-height)
+        }
+        dialog[data-template=polaroid] figure{
+          --opening-width:min(var(--room-width),calc(var(--room-height) * var(--photo-ratio,1)));
+          width:calc(max(var(--opening-width),min(60px,var(--room-width))) + 2 * var(--side) + 2px);
+          padding:0 var(--side) var(--bottom);grid-template-columns:minmax(0,1fr);grid-template-rows:var(--toolbar) auto
+        }
+        dialog[data-template=polaroid] .well{justify-self:center;width:var(--opening-width);aspect-ratio:var(--photo-ratio,1)}
+        dialog[data-template=polaroid] .close{flex:none}
+        dialog[data-template=polaroid]:not([data-load-error]) .status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        dialog[data-template=polaroid][data-load-error] figure{width:min(320px,var(--paper-limit));grid-template-rows:auto;padding:6px var(--side)}
+        dialog[data-template=polaroid][data-load-error] .well{display:none}
+        dialog[data-template=album] figure{width:min(690px,calc(100vw - 30px),calc(164vh - 130px));background:#f8f6f4;border-radius:8px;padding-bottom:clamp(10px,2vw,18px)}
+        dialog[data-template=album] .well{width:100%;aspect-ratio:16/9;border-radius:3px;background:#282524}
+        [hidden]{display:none!important}
+        @supports(height:100dvh){dialog[data-template=polaroid]{--view-height:100dvh}dialog[data-template=album] figure{width:min(690px,calc(100vw - 30px),calc(164dvh - 130px))}}
+        @media(pointer:coarse){dialog[data-template=polaroid]{--toolbar:42px}.bar,.close{min-height:42px}.close{min-width:44px}}
+      </style>
+      <dialog tabindex="-1" aria-label="章节照片"><div class="flash" hidden></div><p class="loading" role="status" hidden>正在载入照片…</p>
+        <figure hidden><div class="bar"><p class="status" role="status"></p><button class="close" type="button" aria-label="关闭照片" hidden>× 关闭</button></div>
+          <div class="well"><img alt="" draggable="false"></div></figure>
+      </dialog>`;
+    const dialog = root.querySelector("dialog");
+    const flash = root.querySelector(".flash"), paper = root.querySelector("figure");
+    const loading = root.querySelector(".loading");
+    const image = root.querySelector("img"), close = root.querySelector(".close"), status = root.querySelector(".status");
+    const polaroid = preset.templateId === "polaroid";
+    const timing = photoTiming(preset);
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    dialog.dataset.template = preset.templateId;
+    image.alt = preset.title || (polaroid ? "拍立得照片" : "相册照片");
+    const timers = new Set();
+    let active = true, ready = false, holdEnded = false, revealing = false, failed = false;
+    let usedFallback = false, fallbackURL = null, effect = null;
+    function later(fn, ms) {
+      const timer = setTimeout(() => { timers.delete(timer); if (active) fn(); }, ms);
+      timers.add(timer);
+      return timer;
+    }
+    function dismiss() {
+      if (!active) return;
+      active = false;
+      for (const timer of timers) clearTimeout(timer);
+      effect?.cancel();
+      image.onload = image.onerror = null;
+      image.removeAttribute("src");
+      if (dialog.open && typeof dialog.close === "function") dialog.close();
+      window.removeEventListener("pagehide", dismiss);
+      host.remove();
+      release?.();
+      if (fallbackURL) URL.revokeObjectURL(fallbackURL);
+      if (opener?.isConnected) opener.focus({preventScroll:true});
+    }
+    function showClose() {
+      close.hidden = false;
+      if (dialog.matches(":focus-within") || root.activeElement === dialog) close.focus({preventScroll:true});
+    }
+    function showError() {
+      if (!active || ready || failed) return;
+      failed = true;
+      dialog.dataset.loadError = "true";
+      loading.hidden = true; flash.hidden = true; paper.hidden = false;
+      status.textContent = "照片未能载入。关闭后可再次点击正文重试。";
+      showClose();
+    }
+    function reveal() {
+      if (!active || !ready || !holdEnded || revealing || failed) return;
+      revealing = true;
+      status.textContent = "";
+      const fullDuration = polaroid ? timing.revealSeconds * 1000 : 1450;
+      const duration = reduced ? Math.min(160,fullDuration) : fullDuration;
+      const first = polaroid || reduced ? { opacity:0 } : { opacity:0, filter:"blur(9px)", transform:"scale(1.035)" };
+      const final = { opacity:1, filter:"none", transform:"none" };
+      const finish = () => {
+        if (!active) return;
+        image.style.opacity = "1"; image.style.filter = "none"; image.style.transform = "none";
+        effect?.cancel(); effect = null;
+        showClose();
+      };
+      if (duration === 0) { finish(); return; }
+      if (typeof image.animate === "function") {
+        effect = image.animate([first,final],{duration,easing:"ease-in-out",fill:"both"});
+        effect.finished.then(finish,()=>{});
+      } else {
+        Object.assign(image.style,first);
+        image.getBoundingClientRect();
+        image.style.transition = `opacity ${duration}ms ease-in-out, filter ${duration}ms, transform ${duration}ms`;
+        Object.assign(image.style,final);
+        later(finish,duration);
+      }
+    }
+    function presentPaper() {
+      if (failed || !flash.hidden) return;
+      if (polaroid) {
+        if (!image.naturalWidth || !image.naturalHeight) { if (paper.hidden) loading.hidden = false; return; }
+        paper.style.setProperty("--photo-ratio",String(image.naturalWidth / image.naturalHeight));
+      }
+      if (!paper.hidden) return;
+      loading.hidden = true;
+      paper.hidden = false;
+      function endHold() {
+        holdEnded = true;
+        if (!ready) status.textContent = "正在载入照片…";
+        reveal();
+      }
+      if (polaroid && timing.blackHoldSeconds > 0) later(endHold,timing.blackHoldSeconds * 1000);
+      else endHold();
+    }
+    close.addEventListener("click",dismiss);
+    dialog.addEventListener("cancel",event=>{ event.preventDefault(); dismiss(); });
+    dialog.addEventListener("keydown",event=>{ if(event.key==="Escape"){event.preventDefault();dismiss();} });
+    dialog.addEventListener("close",dismiss);
+    dialog.addEventListener("wheel",event=>{ if(!event.ctrlKey) event.preventDefault(); },{passive:false});
+    window.addEventListener("pagehide",dismiss);
+    document.body.append(host);
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else { dialog.setAttribute("open",""); dialog.setAttribute("aria-modal","true"); }
+    dialog.focus({preventScroll:true});
+    if (polaroid && !reduced) {
+      flash.hidden = false; flash.className = "flash fire";
+      later(()=>{flash.hidden = true; presentPaper();},180);
+    }
+    else presentPaper();
+    const loadTimeout = later(showError,25000);
+    image.onload = () => {
+      if (!active || failed) return;
+      if (polaroid && (!image.naturalWidth || !image.naturalHeight)) { showError(); return; }
+      clearTimeout(loadTimeout); timers.delete(loadTimeout);
+      ready = true; presentPaper(); reveal();
+    };
+    image.onerror = async () => {
+      if (!active || failed) return;
+      if (!fallback || usedFallback) { showError(); return; }
+      usedFallback = true;
+      try {
+        const blob = await fallback();
+        if (!active || failed) return;
+        fallbackURL = URL.createObjectURL(blob); image.src = fallbackURL;
+      } catch { showError(); }
+    };
+    image.referrerPolicy = "no-referrer";
+    image.src = url;
+  }
+  // END AO3 chapter animations
 
   const hostId = "ao3-chapter-lyrics";
   const chapterPath = location.pathname.replace(/\/$/, "");
